@@ -16,6 +16,8 @@ const editorConfig = struct {
 
 var E: editorConfig = undefined;
 
+const Wak_Version = "0.0.1";
+
 const mode = enum {
     insert,
     visual,
@@ -111,7 +113,7 @@ fn editorRefreshScreen() !void {
     try abuf.appendSlice("\x1b[?25l");
 
     // 2J: 2 = Entire Screen, J = Erase in Display
-    try abuf.appendSlice("\x1b[2J");
+    // try abuf.appendSlice("\x1b[2J");
 
     // H: equivalent 1;1H moves the cursor to row 1 and col 1
     try abuf.appendSlice("\x1b[H");
@@ -131,7 +133,28 @@ fn editorRefreshScreen() !void {
 fn editorDrawRows() !void {
     var i: u16 = 0;
     while (i < E.screenrows) : (i += 1) {
-        try abuf.append('~');
+        if (i == @divTrunc(E.screenrows, 3)) {
+
+            // Welcome to the rice field Mother Fucker
+            const welcome = "Wak editor -- version" ++ Wak_Version;
+            if (welcome.len > E.screencols) {
+                try abuf.appendSlice(welcome[0..@intCast(E.screencols)]);
+            } else {
+                var padding: i16 = @divTrunc(E.screencols - @as(i16, @intCast(welcome.len)), 2);
+                if (padding > 0) {
+                    try abuf.append('~');
+                    padding -= 1;
+                }
+                while (padding > 0) : (padding -= 1) {
+                    try abuf.append(' ');
+                }
+                try abuf.appendSlice(welcome);
+            }
+        } else {
+            try abuf.append('~');
+        }
+
+        try abuf.appendSlice("\x1b[K");
 
         if (i < E.screenrows - 1) {
             try abuf.appendSlice("\r\n");
@@ -157,7 +180,7 @@ fn editorProcessKeypress() !void {
     } else if (std.ascii.isControl(ch)) {
         print("{d} ", .{ch});
     } else {
-        try abuf.append(ch);
+        print("{u}", .{ch});
     }
 }
 
