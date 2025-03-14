@@ -1,10 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const os = std.os;
 const windows = os.windows;
 const Kernel32 = windows.kernel32;
 const print = std.debug.print;
-
+const exit = std.posix.exit;
 const native_os = builtin.target.os.tag;
 
 const editorConfig = struct {
@@ -165,22 +166,26 @@ fn editorDrawRows() !void {
 fn editorProcessKeypress() !void {
     const ch: u8 = try editorReadKey();
 
-    // inline switch (ch) {
-    //     ctrlKey('q') => die("CTRLQ"),
-    //     std.ascii.isControl(ch) => print("{b} ", .{ch}),
-    //     else => print("{b}:{u} ", .{ ch, ch }),
-    // }
+    switch (ch) {
+        @as(u8, @intCast(ctrlKey('q'))) => {
+            // Clear screen and return cursor to row1 col1
+            print("\x1b[2J", .{});
+            print("\x1b[H", .{});
 
-    if (ch == ctrlKey('q')) {
-        std.debug.print("\x1b[2J", .{});
-        std.debug.print("\x1b[H", .{});
-        std.posix.exit(0);
-    } else if (ch == ctrlKey('w')) {
-        print("row:{} col:{}", .{ E.screenrows, E.screencols });
-    } else if (std.ascii.isControl(ch)) {
-        print("{d} ", .{ch});
-    } else {
-        print("{u}", .{ch});
+            exit(0);
+        },
+
+        @as(u8, @intCast(ctrlKey('w'))) => {
+            print("row:{} col:{}", .{ E.screenrows, E.screencols });
+        },
+
+        else => {
+            if (std.ascii.isControl(ch)) {
+                print("{d} ", .{ch});
+            } else {
+                print("{d}:{u} ", .{ ch, ch });
+            }
+        },
     }
 }
 
@@ -294,13 +299,12 @@ fn visualMode() !void {}
 fn die(er: [:0]const u8) void {
     std.debug.print("\x1b[2J", .{});
     std.debug.print("\x1b[H", .{});
-
     pError(er);
-    std.posix.exit(1);
 }
 
 fn pError(errMessage: [:0]const u8) void {
     std.debug.print("Error:{s}\n", .{errMessage});
+    exit(1);
 }
 
 fn printOS() void {
