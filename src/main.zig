@@ -11,6 +11,11 @@ const heap = std.heap;
 
 const keySize = u16;
 
+const erow = struct {
+    size: i16,
+    chars: std.ArrayList(u8) = undefined,
+};
+
 const editorConfig = struct {
     cx: i16 = undefined,
     cy: i16 = undefined,
@@ -19,6 +24,8 @@ const editorConfig = struct {
     TIOCGWINSZ: u32 = undefined,
     Original_Input_Mode: windows.DWORD = undefined,
     Original_Output_Mode: windows.DWORD = undefined,
+    numrows: usize = undefined,
+    row: erow = undefined,
 };
 
 const editorKey = enum(keySize) {
@@ -26,6 +33,9 @@ const editorKey = enum(keySize) {
     ARROW_DOWN,
     ARROW_UP,
     ARROW_RIGHT,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
     PAGE_DOWN,
     PAGE_UP,
 };
@@ -43,26 +53,44 @@ const mode = enum {
 var arena: heap.ArenaAllocator = undefined;
 var abuf: std.ArrayList(u8) = undefined;
 
-pub fn main() !void {
-
-    // const stdout = std.io.getStdOut().writer();
-
+pub fn main() void {
     arena = heap.ArenaAllocator.init(heap.page_allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
-    abuf = std.ArrayList(u8).init(allocator);
+
     initEditor();
-    // print("row:{} col:{}", .{ E.screenrows, E.screenrows });
-    newline();
+    //editorOpen("program.txt");
     enableRawMode();
+    defer disableRawMode();
     while (true) {
-        editorRefreshScreen();
+        editorRefreshScreen() catch |err| switch (err) {
+            std.mem.Allocator.Error.OutOfMemory => {
+                die("Out of memory!");
+            },
+        };
+
         editorProcessKeypress();
     }
-    disableRawMode();
+}
+
+fn editorOpen(filename: [:0]const u8) void {
+    const cwd: std.fs.Dir = std.fs.cwd();
+    const file: std.fs.File = cwd.openFile(filename, .{ .mode = .read_only }) catch |err| switch (err) {
+        std.fs.File.OpenError.FileNotFound => cwd.createFile(filename, .{}) catch die("??????"),
+        else => die("??lol??"),
+    };
+    defer file.close();
+    var content: [1024]u8 = [_]u8{'A'} ** 1024;
+    const bytes_read = file.readAll(&content) catch die("Can't Read");
+    const allocator = arena.allocator();
+    E.row.chars = std.ArrayList(u8).init(allocator);
+    E.row.chars.appendSlice(content[0..bytes_read]) catch die("Out of memory");
+    E.numrows = 6;
 }
 
 fn initEditor() void {
+    const allocator = arena.allocator();
+    abuf = std.ArrayList(u8).init(allocator);
+
     E = switch (native_os) {
         .windows => editorConfig{
             .TIOCGWINSZ = 0x5413,
@@ -72,8 +100,9 @@ fn initEditor() void {
         },
         else => editorConfig{},
     };
-    E.cx = 0;
-    E.cy = 0;
+    E.cx = 1;
+    E.cy = 1;
+    E.numrows = 0;
     if (getWindowSize(&E.screenrows, &E.screencols) == false) {
         die("getWindowSize");
     }
@@ -84,13 +113,9 @@ fn enableRawMode() void {
     switch (native_os) {
         .windows => {
             const H_INPUT = kernel32.GetStdHandle(windows.STD_INPUT_HANDLE) orelse exit(1);
-            const H_OUTPUT = kernel32.GetStdHandle(windows.STD_OUTPUT_HANDLE) orelse exit(1);
 
             if (kernel32.GetConsoleMode(H_INPUT, &E.Original_Input_Mode) == 0) {
                 die("Get Console Mode H_INPUT");
-            }
-            if (kernel32.GetConsoleMode(H_OUTPUT, &E.Original_Output_Mode) == 0) {
-                die("Get Console Mode H_OUTPUT");
             }
 
             const ENABLE_ECHO_INPUT: windows.DWORD = 0x0004;
@@ -107,9 +132,14 @@ fn enableRawMode() void {
                 die("Set Console Mode H_Input");
             }
 
+            const H_OUTPUT = kernel32.GetStdHandle(windows.STD_OUTPUT_HANDLE) orelse exit(1);
+
+            if (kernel32.GetConsoleMode(H_OUTPUT, &E.Original_Output_Mode) == 0) {
+                die("Get Console Mode H_OUTPUT");
+            }
+
             const ENABLE_VIRTUAL_TERMINAL_PROCESSING: windows.DWORD = 0x0004;
             const Raw_Output_Mode: windows.DWORD = E.Original_Output_Mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-
             if (kernel32.SetConsoleMode(H_OUTPUT, Raw_Output_Mode) == 0) {
                 die("Set Console Mode H_OUTPUT");
             }
@@ -124,16 +154,15 @@ fn enableRawMode() void {
 // Use Condom Prevent STIs
 fn disableRawMode() void {
     // windows
-    //
     switch (native_os) {
         .windows => {
+            newline();
             const H_INPUT = kernel32.GetStdHandle(windows.STD_INPUT_HANDLE) orelse exit(1);
             const H_OUTPUT = kernel32.GetStdHandle(windows.STD_OUTPUT_HANDLE) orelse exit(1);
 
             if (kernel32.SetConsoleMode(H_INPUT, E.Original_Input_Mode) == 0) {
                 die("Set Console Mode H_Input");
             }
-
             if (kernel32.SetConsoleMode(H_OUTPUT, E.Original_Output_Mode) == 0) {
                 die("Set Console Mode H_OUTPUT");
             }
@@ -148,62 +177,67 @@ fn disableRawMode() void {
     }
 }
 
-fn editorRefreshScreen() void {
+fn editorRefreshScreen() !void {
 
     // \x1b represents Escape Character ASCII 27
     // [ indicates Control Sequence (CSI)
 
     // Hide Cursor
-    abuf.appendSlice("\x1b[?25l") catch die("Out of memory!");
+    try abuf.appendSlice("\x1b[?25l");
 
     // 2J: 2 = Entire Screen, J = Erase in Display
     // try abuf.appendSlice("\x1b[2J");
 
     // H: equivalent 1;1H moves the cursor to row 1 and col 1
-    abuf.appendSlice("\x1b[H") catch die("Out of memory!");
+    try abuf.appendSlice("\x1b[H");
 
-    editorDrawRows();
+    try editorDrawRows();
 
     // Move Cursor to the position stored
-    const buf = std.fmt.allocPrint(heap.page_allocator, "\x1b[{};{}H", .{ E.cy, E.cx }) catch die("OutOfMemory!");
+    const buf = try std.fmt.allocPrint(heap.page_allocator, "\x1b[{};{}H", .{ E.cy, E.cx });
 
-    abuf.appendSlice(buf) catch die("Out of memory!");
+    try abuf.appendSlice(buf);
 
     // Display Cursor
-    abuf.appendSlice("\x1b[?25h") catch die("Out of memory!");
-
+    try abuf.appendSlice("\x1b[?25h");
     print("{s}", .{abuf.items});
 }
 
 // Draw Tilde ~
-fn editorDrawRows() void {
-    var i: u16 = 0;
-    while (i < E.screenrows) : (i += 1) {
-        if (i == @divTrunc(E.screenrows, 3)) {
+fn editorDrawRows() !void {
+    var y: u16 = 0;
+    while (y < E.screenrows) : (y += 1) {
+        if (y >= E.numrows) {
+            if (y == @divTrunc(E.screenrows, 3)) {
 
-            // Welcome to the rice field Mother Fucker
-            const welcome = "Wak editor -- version" ++ Wak_Version;
-            if (welcome.len > E.screencols) {
-                abuf.appendSlice(welcome[0..@intCast(E.screencols)]) catch die("Out of memory!");
+                // Welcome to the rice field Mother Fucker
+                const welcome = "Wak editor -- version" ++ Wak_Version;
+                if (welcome.len > E.screencols) {
+                    try abuf.appendSlice(welcome[0..@intCast(E.screencols)]);
+                } else {
+                    var padding: i16 = @divTrunc(E.screencols - @as(i16, @intCast(welcome.len)), 2);
+                    if (padding > 0) {
+                        try abuf.append('~');
+                        padding -= 1;
+                    }
+                    while (padding > 0) : (padding -= 1) {
+                        try abuf.append(' ');
+                    }
+                    try abuf.appendSlice(welcome);
+                }
             } else {
-                var padding: i16 = @divTrunc(E.screencols - @as(i16, @intCast(welcome.len)), 2);
-                if (padding > 0) {
-                    abuf.append('~') catch die("Out of memory!");
-                    padding -= 1;
-                }
-                while (padding > 0) : (padding -= 1) {
-                    abuf.append(' ') catch die("Out of memory!");
-                }
-                abuf.appendSlice(welcome) catch die("Out of memory!");
+                try abuf.append('~');
             }
         } else {
-            abuf.append('~') catch die("Out of memory!");
+            var len = E.row.size;
+            if (len > E.screencols) len = E.screencols;
+            try abuf.appendSlice(E.row.chars.items);
         }
 
-        abuf.appendSlice("\x1b[K") catch die("Out of memory!");
+        try abuf.appendSlice("\x1b[K");
 
-        if (i < E.screenrows - 1) {
-            abuf.appendSlice("\r\n") catch die("Out of memory!");
+        if (y < E.screenrows - 1) {
+            try abuf.appendSlice("\r\n");
         }
     }
 }
@@ -220,11 +254,24 @@ fn editorProcessKeypress() void {
             exit(0);
         },
 
-        @as(keySize, @intCast(ctrlKey('w'))) => {
-            print("row:{} col:{}", .{ E.screenrows, E.screencols });
+        @as(keySize, @intCast(ctrlKey('e'))) => {
+            enableRawMode();
+        },
+        @as(keySize, @intCast(ctrlKey('d'))) => {
+            disableRawMode();
         },
 
-        @intFromEnum(editorKey.ARROW_RIGHT), @intFromEnum(editorKey.ARROW_UP), @intFromEnum(editorKey.ARROW_DOWN), @intFromEnum(editorKey.ARROW_LEFT) => editorMoveCursor(ch),
+        @intFromEnum(editorKey.HOME_KEY) => {
+            E.cx = 0;
+        },
+
+        @intFromEnum(editorKey.END_KEY) => {
+            E.cx = E.screencols;
+        },
+
+        @intFromEnum(editorKey.ARROW_RIGHT), @intFromEnum(editorKey.ARROW_UP), @intFromEnum(editorKey.ARROW_DOWN), @intFromEnum(editorKey.ARROW_LEFT) => {
+            editorMoveCursor(ch);
+        },
         @intFromEnum(editorKey.PAGE_DOWN), @intFromEnum(editorKey.PAGE_UP) => {
             var count: i16 = E.screenrows;
             while (count > 0) : (count -= 1) {
@@ -251,8 +298,13 @@ fn editorReadKey() keySize {
             if (buf[2] >= '0' and buf[2] <= '9') {
                 if (buf[3] == '~') {
                     switch (buf[2]) {
+                        '1' => return @intFromEnum(editorKey.HOME_KEY),
+                        '3' => return @intFromEnum(editorKey.DEL_KEY),
+                        '4' => return @intFromEnum(editorKey.END_KEY),
                         '5' => return @intFromEnum(editorKey.PAGE_UP),
                         '6' => return @intFromEnum(editorKey.PAGE_DOWN),
+                        '7' => return @intFromEnum(editorKey.HOME_KEY),
+                        '8' => return @intFromEnum(editorKey.END_KEY),
                         else => {},
                     }
                 }
@@ -262,22 +314,34 @@ fn editorReadKey() keySize {
                     'B' => return @intFromEnum(editorKey.ARROW_DOWN),
                     'C' => return @intFromEnum(editorKey.ARROW_RIGHT),
                     'D' => return @intFromEnum(editorKey.ARROW_LEFT),
+                    'H' => return @intFromEnum(editorKey.HOME_KEY),
+                    'F' => return @intFromEnum(editorKey.END_KEY),
                     else => {},
                 }
+            }
+        } else if (buf[0] == 'O') {
+            switch (buf[1]) {
+                'H' => return @intFromEnum(editorKey.HOME_KEY),
+                'F' => return @intFromEnum(editorKey.END_KEY),
+                else => {},
             }
         }
 
         return '\x1b';
-    } else {
-        return buf[0];
     }
-    return buf[0];
+    switch (buf[0]) {
+        'h', 'H' => return @intFromEnum(editorKey.ARROW_LEFT),
+        'j', 'J' => return @intFromEnum(editorKey.ARROW_DOWN),
+        'k', 'K' => return @intFromEnum(editorKey.ARROW_UP),
+        'l', 'L' => return @intFromEnum(editorKey.ARROW_RIGHT),
+        else => return buf[0],
+    }
 }
 
 fn editorMoveCursor(key: keySize) void {
     switch (key) {
         @intFromEnum(editorKey.ARROW_LEFT) => {
-            if (E.cx != 0)
+            if (E.cx != 1)
                 E.cx -= 1;
         },
         @intFromEnum(editorKey.ARROW_RIGHT) => {
@@ -285,7 +349,7 @@ fn editorMoveCursor(key: keySize) void {
                 E.cx += 1;
         },
         @intFromEnum(editorKey.ARROW_UP) => {
-            if (E.cy != 0)
+            if (E.cy != 1)
                 E.cy -= 1;
         },
         @intFromEnum(editorKey.ARROW_DOWN) => {
