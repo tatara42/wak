@@ -1,3 +1,2 @@
-# Wak is a terminal text editor written in zig
-
-![](Images/wak.png)
+# Wak 
+Terminal text editor written in zig
